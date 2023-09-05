@@ -104,7 +104,7 @@ class ProxyVpnService : VpnService(), IProtectSocket {
     private fun createVpnInterface(proxyHost: String, proxyPort: Int, allowPackages: List<String>?):
             ParcelFileDescriptor? {
         val build = Builder()
-            .setMtu(MAX_PACKET_LEN)
+            .setMtu(IProtectSocket.MAX_PACKET_LEN)
             .addAddress("10.0.0.2", 32)
             .addRoute("0.0.0.0", 0)
             .setSession(baseContext.applicationInfo.name)
