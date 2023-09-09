@@ -69,29 +69,14 @@ class HttpChannelHandler extends ChannelHandler<HttpRequest> {
   @override
   void exceptionCaught(Channel channel, error, {StackTrace? trace}) {
     super.exceptionCaught(channel, error, trace: trace);
-    HostAndPort? hostAndPort = channel.getAttribute(AttributeKeys.host);
-    hostAndPort ??= HostAndPort.host(channel.remoteAddress.host, channel.remotePort);
-    String message = error.toString();
-    HttpStatus status = HttpStatus(-1, message);
-    if (error is HandshakeException) {
-      status = HttpStatus(-2, 'SSL握手失败');
-    } else if (error is ParserException) {
-      status = HttpStatus(-3, error.message);
-    } else if (error is SocketException) {
-      status = HttpStatus(-4, error.message);
-    }
-    HttpRequest request = HttpRequest(HttpMethod.connect, hostAndPort.domain)
-      ..body = message.codeUnits
-    ..hostAndPort = hostAndPort;
-    request.response = HttpResponse(status)..body = message.codeUnits;
-    listener?.onRequest(channel, request);
-    listener?.onResponse(channel, request.response!);
+    _exceptionHandler(channel, channel.getAttribute(AttributeKeys.request), error);
   }
 
   @override
   void channelInactive(Channel channel) {
     Channel? remoteChannel = channel.getAttribute(channel.id);
     remoteChannel?.close();
+    // log.i("[${channel.id}] close  ${channel.error}");
   }
 
   //请求本服务
@@ -118,28 +103,67 @@ class HttpChannelHandler extends ChannelHandler<HttpRequest> {
 
   /// 转发请求
   Future<void> forward(Channel channel, HttpRequest httpRequest) async {
-    // log.i("[${channel.id}] ${httpRequest.method.name} ${httpRequest.requestUrl}");
+    log.i("[${channel.id}] ${httpRequest.method.name} ${httpRequest.requestUrl}");
+    if (channel.error != null) {
+      _exceptionHandler(channel, httpRequest, channel.error);
+      return;
+    }
 
     //获取远程连接
-    var remoteChannel = await _getRemoteChannel(channel, httpRequest);
-    remoteChannel.putAttribute(remoteChannel.id, channel);
+    Channel remoteChannel;
+    try {
+      remoteChannel = await _getRemoteChannel(channel, httpRequest);
+      remoteChannel.putAttribute(remoteChannel.id, channel);
+    } catch (error) {
+      channel.error = error; //记录异常
+      //https代理新建连接请求
+      if (httpRequest.method == HttpMethod.connect) {
+        await channel.write(
+            HttpResponse(HttpStatus.ok.reason('Connection established'), protocolVersion: httpRequest.protocolVersion));
+      }
+      return;
+    }
 
     //实现抓包代理转发
     if (httpRequest.method != HttpMethod.connect) {
       log.i("[${channel.id}] ${httpRequest.method.name} ${httpRequest.requestUrl}");
 
-      var replaceBody = requestRewrites?.findRequestReplaceWith(httpRequest.hostAndPort?.host, httpRequest.path());
-      if (replaceBody?.isNotEmpty == true) {
-        httpRequest.body = utf8.encode(replaceBody!);
-      }
+      //替换请求体
+      _rewriteBody(httpRequest);
 
       if (!HostFilter.filter(httpRequest.hostAndPort?.host)) {
         listener?.onRequest(channel, httpRequest);
       }
+
+      //重定向
+      var redirectRewrite =
+          requestRewrites?.findRequestRewrite(httpRequest.hostAndPort?.host, httpRequest.path(), RuleType.redirect);
+      if (redirectRewrite?.redirectUrl?.isNotEmpty == true) {
+        var proxyHandler = HttpResponseProxyHandler(channel, listener: listener, requestRewrites: requestRewrites);
+        httpRequest.uri = redirectRewrite!.redirectUrl!;
+        httpRequest.headers.host = Uri.parse(redirectRewrite.redirectUrl!).host;
+        var redirectChannel = await HttpClients.connect(Uri.parse(redirectRewrite.redirectUrl!), proxyHandler);
+        await redirectChannel.write(httpRequest);
+        return;
+      }
+
       await remoteChannel.write(httpRequest);
     }
   }
 
+  //替换请求体
+  _rewriteBody(HttpRequest httpRequest) {
+    var rewrite = requestRewrites?.findRequestRewrite(httpRequest.hostAndPort?.host, httpRequest.path(), RuleType.body);
+
+    if (rewrite?.requestBody?.isNotEmpty == true) {
+      httpRequest.body = utf8.encode(rewrite!.requestBody!);
+    }
+    if (rewrite?.queryParam?.isNotEmpty == true) {
+      httpRequest.uri = httpRequest.requestUri?.replace(query: rewrite!.queryParam!).toString() ?? httpRequest.uri;
+    }
+  }
+
+  /// 下载证书
   void _crtDownload(Channel channel, HttpRequest request) async {
     const String fileMimeType = 'application/x-x509-ca-cert';
     var response = HttpResponse(HttpStatus.ok);
@@ -192,8 +216,29 @@ class HttpChannelHandler extends ChannelHandler<HttpRequest> {
       await clientChannel.write(
           HttpResponse(HttpStatus.ok.reason('Connection established'), protocolVersion: httpRequest.protocolVersion));
     }
-
     return proxyChannel;
+  }
+
+  /// 异常处理
+  _exceptionHandler(Channel channel, HttpRequest? request, error) {
+    HostAndPort? hostAndPort = channel.getAttribute(AttributeKeys.host);
+    hostAndPort ??= HostAndPort.host(channel.remoteAddress.host, channel.remotePort);
+    String message = error.toString();
+    HttpStatus status = HttpStatus(-1, message);
+    if (error is HandshakeException) {
+      status = HttpStatus(-2, 'SSL握手失败');
+    } else if (error is ParserException) {
+      status = HttpStatus(-3, error.message);
+    } else if (error is SocketException) {
+      status = HttpStatus(-4, error.message);
+    }
+    request ??= HttpRequest(HttpMethod.connect, hostAndPort.domain)
+      ..body = message.codeUnits
+      ..hostAndPort = hostAndPort;
+
+    request.response = HttpResponse(status)..body = message.codeUnits;
+    listener?.onRequest(channel, request);
+    listener?.onResponse(channel, request.response!);
   }
 }
 
