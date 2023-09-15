@@ -15,10 +15,12 @@ import androidx.core.app.NotificationCompat
  * VPN服务
  * @author wanghongen
  */
-class ProxyVpnService : VpnService(), IProtectSocket {
+class ProxyVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     companion object {
+        const val MAX_PACKET_LEN = 1500
+
         const val ProxyHost = "ProxyHost"
         const val ProxyPort = "ProxyPort"
         const val AllowApps = "AllowApps" //允许的名单
@@ -104,7 +106,7 @@ class ProxyVpnService : VpnService(), IProtectSocket {
     private fun createVpnInterface(proxyHost: String, proxyPort: Int, allowPackages: List<String>?):
             ParcelFileDescriptor? {
         val build = Builder()
-            .setMtu(IProtectSocket.MAX_PACKET_LEN)
+            .setMtu(MAX_PACKET_LEN)
             .addAddress("10.0.0.2", 32)
             .addRoute("0.0.0.0", 0)
             .setSession(baseContext.applicationInfo.name)
